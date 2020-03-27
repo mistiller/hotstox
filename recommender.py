@@ -64,7 +64,7 @@ class Recommender:
         portfolios = self._opt_portfolio(df_w['Adj Close'], df_w['Adj Close'].columns.unique(), iterations = 5000)
         dd=portfolios.head(50).T.join(self.results['reco_score']).sort_values('reco_score', ascending = False)
 
-        df_d=pd.DataFrame(np.multiply((dd.values > 0).astype(np.int).T, dd['reco_score'].values)).iloc[:-1].dropna(axis=1)
+        df_d=pd.DataFrame(np.multiply((dd.fillna(0).values > 0).astype(np.int).T, dd['reco_score'].values)).iloc[:-1].dropna(axis=1)
         df_d.columns=dd.index[:-1]
         df_d.index=df_d.index+1
 
