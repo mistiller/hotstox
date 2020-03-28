@@ -1,4 +1,5 @@
 import matplotlib.pyplot as pp
+from matplotlib import cm
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ DEFAULT_SYMBOLS = ['AAPL', 'MSFT', 'MCD', 'DIS', 'GS']
 class Recommender:
     symbols = None
     results = pd.DataFrame()
+    port_summary = pd.DataFrame()
 
     def __init__(self, symbols:list=None):
         self.symbols = symbols or DEFAULT_SYMBOLS
@@ -39,13 +41,18 @@ class Recommender:
 
         self.results = self._fetch_data(self.symbols)
 
+        self.port_summary = self.get_portfolio_summary(top_n = 20)
+
+        self.results['sharpe_participation']=self.port_summary.sum(axis=1)/self.port_summary.sum(axis=1).mean()
+        self.results['sharpe_participation'].fillna(0, inplace=True)
+
     def get_all_metrics(self)->pd.DataFrame:
         """Return a dataframe with all calculated and collected metrics per symbol."""
         return self.results
 
     def get_rel_metrics(self)->pd.DataFrame:
         """Return a dataframe with all the metrics per symbol that were considered for the reco."""
-        return self.results.sort_values('reco_score', ascending=False)[self.relevant_metrics+['reco_score']]
+        return self.results.sort_values('reco_score', ascending=False)[self.relevant_metrics+['reco_score', 'sharpe_participation']]
 
     def get_portfolio_summary(self, top_n =25)->pd.DataFrame:
         """
@@ -68,8 +75,9 @@ class Recommender:
         df_d.columns=dd.index[:-1]
         df_d.index=df_d.index+1
 
-        df_d.sum(axis=1)
-        return dd.append(pd.Series(df_d.sum(axis=1), name='sum_reco_score'))
+        dd = dd.append(pd.Series(df_d.mean(axis=1), name='mean_reco_score'))
+
+        return dd
 
     def plot_metrics(self, pairs:list=[('profitMargins', 'rsi')]):
         if len(pairs) == 1:
@@ -151,69 +159,7 @@ class Recommender:
             ax[row][col].set(xlim = xlim, ylim = ylim, xlabel=metric_a, ylabel=metric_b)
             
             col+=1
-
-    def _get_vars(self, data):
-        def estimate_volatility(ret:np.array):
-            returns = ret[np.isnan(ret)==False]
-            dx = 0.0001  # resolution
-            x = np.arange(returns.min(), returns.max(), dx)
-
-            # N(x; mu, sig) best fit (finding: mu, stdev)
-            mu_norm, sig_norm = norm.fit(returns)
-            pdf = norm.pdf(x, mu_norm, sig_norm)
-
-            # Student t best fit (finding: nu)
-            parm = t.fit(returns)
-            nu, mu_t, sig_t = parm
-            nu = np.round(nu)
-            pdf2 = t.pdf(x, nu, mu_t, sig_t)
-            
-            walks=self._get_brownian_motion_returns(nu, mu_t, sig_t, 50)
-            med_walk, lower_walk, upper_walk = np.percentile(walks, 50, axis=1)[-1], np.percentile(walks, 20, axis=1)[-1], np.percentile(walks, 80, axis=1)[-1]
-
-            h = 1
-            alpha = 0.05  # significance level
-            lev = 100*(1-alpha)
-            xanu = t.ppf(alpha, nu)
-
-            VaR_t = np.sqrt((nu-2)/nu) * t.ppf(1-alpha, nu)*sig_norm  - h*mu_norm
-            CVaR_t = -1/alpha * (1-nu)**(-1) * (nu-2+xanu**2) * \
-                            t.pdf(xanu, nu)*sig_norm  - h*mu_norm
-            
-            if (VaR_t < 0) or (CVaR_t <0):
-                return {
-                    'Sample Mean': np.nan,
-                    'Sample StdDev':np.nan,
-                    'nu': nu,
-                    "%g%% %g-period Student t VaR" % (lev, h): np.nan,
-                    "%g%% %g-period Student t CVaR" % (lev, h): np.nan,
-                    "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
-                    'periods_included': len(returns)
-                }
-
-            return {
-                'Sample Mean': mu_norm,
-                'Sample StdDev': sig_norm,
-                'nu': nu,
-                "%g%% %g-period Student t VaR" % (lev, h): VaR_t*100,
-                "%g%% %g-period Student t CVaR" % (lev, h): CVaR_t*100,
-                "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
-                'periods_included': len(returns)
-            }
-
-        cols=data['Adj Close'].columns.unique()
-        dta = pd.DataFrame()
-        results=[]
-        for c in cols:
-            t1=data['Adj Close'][c].values
-            t0 = np.roll(t1,shift=-1)
-            ret = (t1[:-1]-t0[:-1])/t0[:-1]
-            res=estimate_volatility(ret)
-            res['symbol']=c
-            results.append(res)
-
-        return pd.DataFrame().from_dict(results)
-
+    
     def _fetch_data(self, symbols:list)->pd.DataFrame:
         data = self._get_history(symbols)
             
@@ -320,8 +266,70 @@ class Recommender:
         results['dividendYield']=results['dividendYield'].fillna(0)
 
         results['reco_score'] = self._get_reco_score(results, self.relevant_metrics)
-        
+
         return results
+
+    def _get_vars(self, data)->pd.DataFrame:
+        def estimate_volatility(ret:np.array):
+            returns = ret[np.isnan(ret)==False]
+            dx = 0.0001  # resolution
+            x = np.arange(returns.min(), returns.max(), dx)
+
+            # N(x; mu, sig) best fit (finding: mu, stdev)
+            mu_norm, sig_norm = norm.fit(returns)
+            pdf = norm.pdf(x, mu_norm, sig_norm)
+
+            # Student t best fit (finding: nu)
+            parm = t.fit(returns)
+            nu, mu_t, sig_t = parm
+            nu = np.round(nu)
+            pdf2 = t.pdf(x, nu, mu_t, sig_t)
+            
+            walks=self._get_brownian_motion_returns(nu, mu_t, sig_t, 50)
+            med_walk, lower_walk, upper_walk = np.percentile(walks, 50, axis=1)[-1], np.percentile(walks, 20, axis=1)[-1], np.percentile(walks, 80, axis=1)[-1]
+
+            h = 1
+            alpha = 0.05  # significance level
+            lev = 100*(1-alpha)
+            xanu = t.ppf(alpha, nu)
+
+            VaR_t = np.sqrt((nu-2)/nu) * t.ppf(1-alpha, nu)*sig_norm  - h*mu_norm
+            CVaR_t = -1/alpha * (1-nu)**(-1) * (nu-2+xanu**2) * \
+                            t.pdf(xanu, nu)*sig_norm  - h*mu_norm
+            
+            if (VaR_t < 0) or (CVaR_t <0):
+                return {
+                    'Sample Mean': np.nan,
+                    'Sample StdDev':np.nan,
+                    'nu': nu,
+                    "%g%% %g-period Student t VaR" % (lev, h): np.nan,
+                    "%g%% %g-period Student t CVaR" % (lev, h): np.nan,
+                    "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
+                    'periods_included': len(returns)
+                }
+
+            return {
+                'Sample Mean': mu_norm,
+                'Sample StdDev': sig_norm,
+                'nu': nu,
+                "%g%% %g-period Student t VaR" % (lev, h): VaR_t*100,
+                "%g%% %g-period Student t CVaR" % (lev, h): CVaR_t*100,
+                "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
+                'periods_included': len(returns)
+            }
+
+        cols=data['Adj Close'].columns.unique()
+        dta = pd.DataFrame()
+        results=[]
+        for c in cols:
+            t1=data['Adj Close'][c].values
+            t0 = np.roll(t1,shift=-1)
+            ret = (t1[:-1]-t0[:-1])/t0[:-1]
+            res=estimate_volatility(ret)
+            res['symbol']=c
+            results.append(res)
+
+        return pd.DataFrame().from_dict(results)
 
     ## static methods
     @staticmethod
@@ -330,13 +338,14 @@ class Recommender:
 
         df_ch = df_ch / df_ch.mean(axis=0)
 
-        df_ch['95% 1-period Student t CVaR']=1/df_ch['95% 1-period Student t CVaR']
-        df_ch['beta']=1/df_ch['beta']
+        df_ch['95% 1-period Student t CVaR']=1/df_ch['95% 1-period Student t CVaR']**2
+        df_ch['beta']=1/df_ch['beta']**2
         #df_ch['mfi']=50/df_ch['mfi']
-        df_ch['forwardPE']=1/df_ch['forwardPE']
-        df_ch['pegRatio']=1/df_ch['pegRatio']
+        df_ch['forwardPE']=1.8/np.sqrt(df_ch['forwardPE'])
+        df_ch['pegRatio']=1.2/np.sqrt(df_ch['pegRatio'])
+
         df_ch['governanceScore']=1.5/df_ch['governanceScore']**2
-        df_ch['profitMargins']=df_ch['profitMargins']**2
+        df_ch['dividendYield']=df_ch['dividendYield']**2
 
         df_ch.fillna(0, inplace=True)
         #df_ch['rsi']=50/df_ch['rsi']
@@ -415,8 +424,6 @@ class Recommender:
         num_assets=len(symbols)
         returns = np.log(adj_closes / adj_closes.shift(1))
         
-        port_returns = []
-        port_vols = []
         sharpes = []
         weight_list = []
         
@@ -433,13 +440,9 @@ class Recommender:
             port_vol = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
             sharpe = port_return/port_vol
             
-            port_returns.append(port_return)
-            port_vols.append(port_vol)
             sharpes.append(sharpe)
         
         # Convert lists to arrays
-        port_returns = np.array(port_returns)
-        port_vols = np.array(port_vols)
         sharpes = np.array(sharpes)
         weight_list = np.array(weight_list)
         
