@@ -11,40 +11,53 @@ import talib
 
 from scipy.spatial.distance import correlation
 from scipy.stats import t, norm
+from statsmodels import robust
 
-DEFAULT_RECO_METRICS = [
-        'diversification_score', 
-        '95% 1-period Student t CVaR', 
-        'forwardPE', 
-        'dividendYield',
-        'beta', 
-        'profitMargins', 
-        'pegRatio',
-        #'mfi',
-        'governanceScore',
-        'brownian_motion_score',
-        #'rsi',
-        'share_of_analyst_upgrades'
-        #'earningsQuarterlyGrowth'
-]
+DEFAULT_RECO_METRICS = {
+        'diversification_score': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0}, 
+        '95% 1-period Student t CVaR' : {'f': lambda x: 1/x**2 if x.min() > 0  else 0, 'w': 1.0}, 
+        'forwardPE' : {'f': lambda x: 1/np.sqrt(x) if x.min() > 0  else 0, 'w': 1.0}, 
+        'dividendYield' : {'f': lambda x: x**2 if x.min() > 0  else 0, 'w': 1.0},
+        'beta': {'f': lambda x: 1/x**2 if x.min() > 0  else 0, 'w': 1.0}, 
+        'profitMargins': {'f': lambda x: x if x.min() > 0  else 0, 'w': 1.0}, 
+        'pegRatio': {'f': lambda x: 1/x if x.min() > 0  else 0, 'w': 1.0},
+        'mfi': {'f': lambda x: 1/x if x.min() > 0  else 0, 'w': 1.0},
+        'governanceScore': {'f': lambda x: 1/x if x.min() > 0 else 0, 'w': 1.0},
+        'brownian_mad_sharpe': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0},
+        'rsi': {'f': lambda x: 1/x if x.min() > 0 else 0, 'w': 1.0},
+        'share_of_analyst_upgrades': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0},
+        'bookValue': {'f': lambda x: np.sqrt(x) if x.min() > 0 else 0, 'w': 1.0}
+}
 
 DEFAULT_SYMBOLS = ['AAPL', 'MSFT', 'MCD', 'DIS', 'GS']
 
 class Recommender:
+    """Generates Reco Scores for stocks."""
+
     symbols = None
     results = pd.DataFrame()
     port_summary = pd.DataFrame()
 
-    def __init__(self, symbols:list=None):
+    def __init__(self, symbols:list=None, relevant_metrics:dict = None):
         self.symbols = symbols or DEFAULT_SYMBOLS
-        self.relevant_metrics = DEFAULT_RECO_METRICS
+        self.relevant_metrics = relevant_metrics or DEFAULT_RECO_METRICS
 
         self.results = self._fetch_data(self.symbols)
 
-        self.port_summary = self.get_portfolio_summary(top_n = 20)
+        if len(self.symbols) <= 25:
+            top_n = 25
+        else:
+            top_n=len(self.symbols) 
+        self.port_summary = self._build_portfolio_summary(top_n)
 
         self.results['sharpe_participation']=self.port_summary.sum(axis=1)/self.port_summary.sum(axis=1).mean()
-        self.results['sharpe_participation'].fillna(0, inplace=True)
+        self.results['sharpe_participation']=self.results['sharpe_participation']/self.results['sharpe_participation'].mean()
+
+        self.results['summary_score']=self._normalized_mean(
+            self.results['reco_score'],
+            self.results['sharpe_participation'],
+            self.results['95% 1-period Student t CVaR']
+        )
 
     def get_all_metrics(self)->pd.DataFrame:
         """Return a dataframe with all calculated and collected metrics per symbol."""
@@ -52,9 +65,13 @@ class Recommender:
 
     def get_rel_metrics(self)->pd.DataFrame:
         """Return a dataframe with all the metrics per symbol that were considered for the reco."""
-        return self.results.sort_values('reco_score', ascending=False)[self.relevant_metrics+['reco_score', 'sharpe_participation']]
+        return self.results.sort_values('reco_score', ascending=False)[list(self.relevant_metrics.keys())+['reco_score', 'sharpe_participation', 'summary_score']]#''
 
-    def get_portfolio_summary(self, top_n =25)->pd.DataFrame:
+    def get_portfolio_summary(self)->pd.DataFrame:
+        """Return ranked list of portfolios with sharpe score."""
+        return self.port_summary
+
+    def _build_portfolio_summary(self, top_n =25)->pd.DataFrame:
         """
         Return ranked, recommended portfolios.
 
@@ -65,13 +82,19 @@ class Recommender:
             Dataframe with all the portfolio combinations, sum of reco score and sharpe ratio
 
         """
+
+        if top_n > len(self.symbols):
+            top_n = len(self.symbols)
+
         winners = self.results['reco_score'].sort_values(ascending=False).head(top_n).index.values
         df_w=self._get_history(winners, start='2007-01-01')
 
         portfolios = self._opt_portfolio(df_w['Adj Close'], df_w['Adj Close'].columns.unique(), iterations = 5000)
-        dd=portfolios.head(50).T.join(self.results['reco_score']).sort_values('reco_score', ascending = False)
+        dd=portfolios.head(75).T.join(self.results['reco_score']).sort_values('reco_score', ascending = False)
+        #dd=dd.loc[dd.fillna(0).values > 0]
 
         df_d=pd.DataFrame(np.multiply((dd.fillna(0).values > 0).astype(np.int).T, dd['reco_score'].values)).iloc[:-1].dropna(axis=1)
+        print(dd.index)
         df_d.columns=dd.index[:-1]
         df_d.index=df_d.index+1
 
@@ -166,7 +189,7 @@ class Recommender:
         metrics = [
             '95% 1-period Student t VaR', 
             '95% 1-period Student t CVaR',
-            'brownian_motion_score',
+            'brownian_mad_sharpe',
             'diversification_score',
             'updated'
         ]
@@ -197,7 +220,8 @@ class Recommender:
             'heldPercentInstitutions',
             'heldPercentInsiders',
             'shortRatio',
-            'bookValue'
+            'bookValue',
+            'enterpriseToEbitda'
         ]
 
         results=self._get_vars(data)
@@ -212,7 +236,8 @@ class Recommender:
             ticker= yf.Ticker(s)
             
             if ticker is None:
-                continue
+                self.symbols = [sy for sy in self.symbols if sy != s]
+                continue 
             
             row = dict()
             
@@ -264,6 +289,7 @@ class Recommender:
         results = results.join(pd.DataFrame().from_records(rows).set_index('symbol'))
 
         results['dividendYield']=results['dividendYield'].fillna(0)
+        results['forwardPE']=results['dividendYield'].fillna(500)
 
         results['reco_score'] = self._get_reco_score(results, self.relevant_metrics)
 
@@ -286,6 +312,8 @@ class Recommender:
             pdf2 = t.pdf(x, nu, mu_t, sig_t)
             
             walks=self._get_brownian_motion_returns(nu, mu_t, sig_t, 50)
+            walk_score = walks.mean(axis=1)[-1] / robust.mad(walks, axis=0)[-1]
+
             med_walk, lower_walk, upper_walk = np.percentile(walks, 50, axis=1)[-1], np.percentile(walks, 20, axis=1)[-1], np.percentile(walks, 80, axis=1)[-1]
 
             h = 1
@@ -304,7 +332,7 @@ class Recommender:
                     'nu': nu,
                     "%g%% %g-period Student t VaR" % (lev, h): np.nan,
                     "%g%% %g-period Student t CVaR" % (lev, h): np.nan,
-                    "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
+                    "brownian_mad_sharpe": walk_score,
                     'periods_included': len(returns)
                 }
 
@@ -314,7 +342,7 @@ class Recommender:
                 'nu': nu,
                 "%g%% %g-period Student t VaR" % (lev, h): VaR_t*100,
                 "%g%% %g-period Student t CVaR" % (lev, h): CVaR_t*100,
-                "brownian_motion_score": 100*med_walk/(1+(upper_walk-lower_walk))**2,
+                "brownian_mad_sharpe": walk_score,
                 'periods_included': len(returns)
             }
 
@@ -334,21 +362,15 @@ class Recommender:
     ## static methods
     @staticmethod
     def _get_reco_score(df, relevant_metrics):
-        df_ch=df[relevant_metrics]
+        df_ch=df[list(relevant_metrics.keys())]
 
         df_ch = df_ch / df_ch.mean(axis=0)
 
-        df_ch['95% 1-period Student t CVaR']=1/df_ch['95% 1-period Student t CVaR']**2
-        df_ch['beta']=1/df_ch['beta']**2
-        #df_ch['mfi']=50/df_ch['mfi']
-        df_ch['forwardPE']=1.8/np.sqrt(df_ch['forwardPE'])
-        df_ch['pegRatio']=1.2/np.sqrt(df_ch['pegRatio'])
-
-        df_ch['governanceScore']=1.5/df_ch['governanceScore']**2
-        df_ch['dividendYield']=df_ch['dividendYield']**2
+        for key in relevant_metrics:
+            df_ch[key] = relevant_metrics[key]['f'](df_ch[key]) #* transform['w']
 
         df_ch.fillna(0, inplace=True)
-        #df_ch['rsi']=50/df_ch['rsi']
+        
         
         return df_ch.mean(axis=1)**2
 
@@ -430,7 +452,7 @@ class Recommender:
         for i in range (iterations):
             while True:
                 a=np.random.choice([0,1], size = num_assets)
-                if (a.sum() >= 3) and (a.sum() <= 6):
+                if (a.sum() >= 3) and (a.sum() <= num_assets/2):
                     break
             weights=a/a.sum()
             
@@ -455,3 +477,8 @@ class Recommender:
         res.index=np.arange(1, len(res)+1)
         
         return res
+
+    @staticmethod
+    def _normalized_mean(a, b, n):
+        m = (a+b)/2
+        return m/n
