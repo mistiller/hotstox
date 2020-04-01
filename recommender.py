@@ -13,20 +13,22 @@ from scipy.spatial.distance import correlation
 from scipy.stats import t, norm
 from statsmodels import robust
 
+from sklearn.preprocessing import Normalizer
+
 DEFAULT_RECO_METRICS = {
-        'diversification_score': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0}, 
-        '95% 1-period Student t CVaR' : {'f': lambda x: 1/x**2 if x.min() > 0  else 0, 'w': 1.0}, 
-        'forwardPE' : {'f': lambda x: 1/np.sqrt(x) if x.min() > 0  else 0, 'w': 1.0}, 
-        'dividendYield' : {'f': lambda x: x**2 if x.min() > 0  else 0, 'w': 1.0},
-        'beta': {'f': lambda x: 1/x**2 if x.min() > 0  else 0, 'w': 1.0}, 
-        'profitMargins': {'f': lambda x: x if x.min() > 0  else 0, 'w': 1.0}, 
-        'pegRatio': {'f': lambda x: 1/x if x.min() > 0  else 0, 'w': 1.0},
-        'mfi': {'f': lambda x: 1/x if x.min() > 0  else 0, 'w': 1.0},
-        'governanceScore': {'f': lambda x: 1/x if x.min() > 0 else 0, 'w': 1.0},
-        'brownian_mad_sharpe': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0},
-        'rsi': {'f': lambda x: 1/x if x.min() > 0 else 0, 'w': 1.0},
-        'share_of_analyst_upgrades': {'f': lambda x: x if x.min() > 0 else 0, 'w': 1.0},
-        'bookValue': {'f': lambda x: np.sqrt(x) if x.min() > 0 else 0, 'w': 1.0}
+        'diversification_score': {'f': lambda x: x.fillna(0), 'w': 1.2}, 
+        '95% 1-period Student t CVaR' : {'f': lambda x: (1/x**2).fillna(0), 'w': 1.0}, 
+        'forwardPE' : {'f': lambda x: (1/np.sqrt(x)).fillna(0), 'w': 2.0}, 
+        'dividendYield' : {'f': lambda x: x.fillna(0)**2, 'w': 1.5},
+        'beta': {'f': lambda x: (1/x**2).fillna(0), 'w': 2.0}, 
+        'profitMargins': {'f': lambda x: x.fillna(0), 'w': 1.3}, 
+        'pegRatio': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
+        'mfi': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
+        'governanceScore': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
+        'brownian_mad_sharpe': {'f': lambda x: x.fillna(0), 'w': 2.0},
+        'rsi': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
+        'share_of_analyst_upgrades': {'f': lambda x: x.fillna(0), 'w': 1.1},
+        'bookValue': {'f': lambda x: x.fillna(0), 'w': 1.5}
 }
 
 DEFAULT_SYMBOLS = ['AAPL', 'MSFT', 'MCD', 'DIS', 'GS']
@@ -93,9 +95,9 @@ class Recommender:
         dd=portfolios.head(75).T.join(self.results['reco_score']).sort_values('reco_score', ascending = False)
         #dd=dd.loc[dd.fillna(0).values > 0]
 
-        df_d=pd.DataFrame(np.multiply((dd.fillna(0).values > 0).astype(np.int).T, dd['reco_score'].values)).iloc[:-1].dropna(axis=1)
-        print(dd.index)
-        df_d.columns=dd.index[:-1]
+        df_d=pd.DataFrame(np.multiply((dd.fillna(0).values > 0).astype(np.int).T, dd['reco_score'].values)).iloc[:-1].fillna(0)
+        #print(dd.index)
+        df_d.columns=dd.index#[:-1]
         df_d.index=df_d.index+1
 
         dd = dd.append(pd.Series(df_d.mean(axis=1), name='mean_reco_score'))
@@ -112,8 +114,8 @@ class Recommender:
             x = df_t[metric_a].values
             y = df_t[metric_b].values
 
-            ylim = (y.min()*0.8, y.max()*1.2)
-            xlim = (0, x.max()*1.1)
+            ylim = (y.min()*0.8, y.max()*1.5)
+            xlim = (0, x.max()*1.5)
 
             qx2, qx4 = np.percentile(x, 20), np.percentile(x, 80)
             qy2, qy4 = np.percentile(y, 20), np.percentile(y, 80)
@@ -364,13 +366,17 @@ class Recommender:
     def _get_reco_score(df, relevant_metrics):
         df_ch=df[list(relevant_metrics.keys())]
 
-        df_ch = df_ch / df_ch.mean(axis=0)
+        #df_ch=df_ch.apply(lambda x: x.fillna(np.nanmin(x)), axis=0)
+        #df_ch=df_ch.apply(lambda x: Normalizer().fit_transform(x.values.reshape(1,-1)).flatten())
+
+        #print(df_ch)
 
         for key in relevant_metrics:
-            df_ch[key] = relevant_metrics[key]['f'](df_ch[key]) #* transform['w']
+            df_ch.loc[:,key] = Normalizer().fit_transform(relevant_metrics[key]['f'](df_ch[key]).values.reshape(1,-1)).flatten() * relevant_metrics[key]['w']
 
         df_ch.fillna(0, inplace=True)
-        
+
+        #print(df_ch)
         
         return df_ch.mean(axis=1)**2
 
@@ -479,6 +485,5 @@ class Recommender:
         return res
 
     @staticmethod
-    def _normalized_mean(a, b, n):
-        m = (a+b)/2
-        return m/n
+    def _normalized_mean(a, b, c):
+        return (a+b)/c
