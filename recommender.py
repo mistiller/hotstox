@@ -8,6 +8,7 @@ import seaborn as sb
 
 import yfinance as yf
 import talib
+import pyflux as pf
 
 from scipy.spatial.distance import correlation
 from scipy.stats import t, norm
@@ -15,20 +16,24 @@ from statsmodels import robust
 
 from sklearn.preprocessing import Normalizer
 
+from typing import Tuple
+
 DEFAULT_RECO_METRICS = {
-        'diversification_score': {'f': lambda x: x.fillna(0), 'w': 1.2}, 
-        '95% 1-period Student t CVaR' : {'f': lambda x: (1/x**2).fillna(0), 'w': 1.0}, 
-        'forwardPE' : {'f': lambda x: (1/np.sqrt(x)).fillna(0), 'w': 2.0}, 
-        'dividendYield' : {'f': lambda x: x.fillna(0)**2, 'w': 1.5},
-        'beta': {'f': lambda x: (1/x**2).fillna(0), 'w': 2.0}, 
-        'profitMargins': {'f': lambda x: x.fillna(0), 'w': 1.3}, 
-        'pegRatio': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
-        'mfi': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
-        'governanceScore': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
-        'brownian_mad_sharpe': {'f': lambda x: x.fillna(0), 'w': 2.0},
-        'rsi': {'f': lambda x: (1/x).fillna(0), 'w': 1.0},
-        'share_of_analyst_upgrades': {'f': lambda x: x.fillna(0), 'w': 1.1},
-        'bookValue': {'f': lambda x: x.fillna(0), 'w': 1.5}
+        'diversification_score': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.2}, 
+        '95% 1-period Student t CVaR' : {'f': lambda x: (1/x**2).apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.0}, 
+        'forwardPE' : {'f': lambda x: (1/np.sqrt(x)).apply(lambda x: x if np.isfinite(x) else 0), 'w': 2.0}, 
+        'dividendYield' : {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0)**2, 'w': 1.5},
+        'beta': {'f': lambda x: (1/x**2).apply(lambda x: x if np.isfinite(x) else 0), 'w': 2.0}, 
+        'profitMargins': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.3}, 
+        'pegRatio': {'f': lambda x: (1/x).apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.0},
+        'mfi': {'f': lambda x: (1/x).apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.0},
+        'governanceScore': {'f': lambda x: (1/x).apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.0},
+        'brownian_mad_sharpe': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 2.0},
+        'rsi': {'f': lambda x: (1/x).apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.0},
+        'share_of_analyst_upgrades': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.1},
+        'bookValue': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 1.5},
+        'tailedness': {'f': lambda x: x.apply(lambda x: x if np.isfinite(x) else 0), 'w': 2},
+        'skew': {'f': lambda x: (x**2).apply(lambda x: x if np.isfinite(x) else 0), 'w': 2}
 }
 
 DEFAULT_SYMBOLS = ['AAPL', 'MSFT', 'MCD', 'DIS', 'GS']
@@ -114,8 +119,8 @@ class Recommender:
             x = df_t[metric_a].values
             y = df_t[metric_b].values
 
-            ylim = (y.min()*0.8, y.max()*1.5)
-            xlim = (0, x.max()*1.5)
+            ylim = (y.min()*0.8, y.max()*1.2)
+            xlim = (0, x.max()*1.2)
 
             qx2, qx4 = np.percentile(x, 20), np.percentile(x, 80)
             qy2, qy4 = np.percentile(y, 20), np.percentile(y, 80)
@@ -193,7 +198,9 @@ class Recommender:
             '95% 1-period Student t CVaR',
             'brownian_mad_sharpe',
             'diversification_score',
-            'updated'
+            'updated',
+            'tailedness',
+            'skew'
         ]
         governance = [
             'socialScore', 
@@ -228,12 +235,15 @@ class Recommender:
 
         results=self._get_vars(data)
         results['diversification_score']=np.nan
+        results['tailedness']=np.nan
+        results['skew']=np.nan
         results.set_index('symbol', inplace=True)
         
         rows = np.array([])
         symbols = results.index.values
         for s in symbols:
             results.at[s, 'diversification_score']=self._get_diversification_score(s, data, 'Adj Close')
+            results.at[s, 'skew'], results.at[s, 'tailedness']=self._get_tail(data['Adj Close'][s])
                 
             ticker= yf.Ticker(s)
             
@@ -366,19 +376,14 @@ class Recommender:
     def _get_reco_score(df, relevant_metrics):
         df_ch=df[list(relevant_metrics.keys())]
 
-        #df_ch=df_ch.apply(lambda x: x.fillna(np.nanmin(x)), axis=0)
-        #df_ch=df_ch.apply(lambda x: Normalizer().fit_transform(x.values.reshape(1,-1)).flatten())
-
-        #print(df_ch)
-
         for key in relevant_metrics:
             df_ch.loc[:,key] = Normalizer().fit_transform(relevant_metrics[key]['f'](df_ch[key]).values.reshape(1,-1)).flatten() * relevant_metrics[key]['w']
 
         df_ch.fillna(0, inplace=True)
 
-        #print(df_ch)
+        print(df_ch)
         
-        return df_ch.mean(axis=1)**2
+        return df_ch.sum(axis=1)**2
 
     @staticmethod
     def _get_history(symbols, start='2000-01-01'):
@@ -485,5 +490,19 @@ class Recommender:
         return res
 
     @staticmethod
+    def _get_tail(closes, lookback:int=200)->Tuple[float, float]:
+        returns = pd.DataFrame(np.diff(np.log(closes.values)))
+        returns.index = closes.index.values[1:closes.index.values.shape[0]]
+        returns.columns = ['Returns']
+
+        skewt_model = pf.SEGARCH(p=1, q=1, data=returns.dropna()[:lookback], target='Returns')
+        x = skewt_model.fit(method='PML')
+        vol, _, _, skew, nu, exp_returns = x.z_values
+
+        if np.abs(skew) > 1:
+            skew = np.nan
+        return (skew, 1/(1+np.sqrt(nu)))
+
+    @staticmethod
     def _normalized_mean(a, b, c):
-        return (a+b)/c
+        return (a*b)/c
